@@ -96,14 +96,16 @@ def main(users: List[Dict]):
     client = DiskClient()
     client_id = os.getenv('CLIENT_ID')
     client_secret = os.getenv('CLIENT_SECRET')
+    if not client_id or not client_secret:
+        raise ValueError('Не указаны переменные окружения CLIENT_ID и CLIENT_SECRET')
     log.info('Загрузка пользователей...')
 
     log.info(f'Загрузка пользователей завершена. Загружено {len(users)} пользователей.')
     processed = 0
     with tqdm(total=len(users), unit="User") as progress:
         for user in users:
-            if user.get('ID')[:3] == '113':
-                user_email = user.get('Email')
+            if user.get('ID', 'no_id')[:3] == '113':
+                user_email = user.get('Email', '')
                 log.info(f'Обработка ресурсов пользователя: {user_email}')
                 try:
                     token = get_service_app_token(user_email, client_id, client_secret)
@@ -154,11 +156,13 @@ if __name__ == '__main__':
                                ])
         w.writeheader()    
 
-    processed, users = main(users=users)
-    
-    end_time = time()
-    log.info(f'Завершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
-    print(f'\nЗавершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
-    print('Отчет: disk_report.log')
-    print('Результат: disk_report.csv')
+    try:
+        processed, users = main(users=users)
+        end_time = time()
+        log.info(f'Завершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
+        print(f'\nЗавершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
+        print('Отчет: disk_report.log')
+        print('Результат: disk_report.csv')
+    except Exception as e:
+        log.error(f'Ошибка: {e}')
     exit(0)

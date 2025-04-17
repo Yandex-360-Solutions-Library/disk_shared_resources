@@ -11,7 +11,14 @@ load_dotenv()
 
 FETCH_RATE = 0.1
 
-api = API360(api_key=os.getenv('TOKEN'), org_id=os.getenv('ORG_ID'), log_level=logging.INFO)
+api_key = os.getenv('TOKEN')
+org_id = os.getenv('ORG_ID')
+
+if not api_key or not org_id:
+    print("Не указаны TOKEN и ORG_ID")
+    exit(0)
+
+api = API360(api_key=api_key, org_id=org_id, log_level=logging.INFO)
 
 
 def fetch_all_users(pages):

@@ -37,7 +37,7 @@ class API360:
             raise Exception(f"Request failed with status {response.status_code}")
     '''
     @staticmethod
-    async def _send_request(path, headers, method='get', body = None, data = None) -> dict:
+    async def _send_request(path, headers, method='get', body = None, data = None) -> dict: # type: ignore
         async with aiohttp.ClientSession() as session:
             if method == 'get':
                 async with session.get(url=path, headers=headers) as response:
@@ -149,7 +149,7 @@ class API360:
 
         return GroupMembers2.from_dict(response_json)
 
-    async def get_service_app_token_async(client_id, client_secret, subject_token, subject_token_type = 'urn:yandex:params:oauth:token-type:uid'):
+    async def get_service_app_token_async(self, client_id, client_secret, subject_token, subject_token_type = 'urn:yandex:params:oauth:token-type:uid'):
         path, headers, data = API360._get_headers(client_id, client_secret, subject_token, subject_token_type)
         response_json = await API360._send_request(path, headers, method='post', data=data)
         return response_json

@@ -9,10 +9,17 @@ from typing import Dict, List
 from tqdm import tqdm
 
 from dotenv import load_dotenv
-from lib.disk360 import DiskClient, PublicResourcesList
-from lib.tools import get_service_app_token, logger
+from y360_orglib import DiskAdminClient, DiskClientError, configure_logger
+from y360_orglib.disk.models import MacroAccess, ResourceShort, UserAccess
 
-log: logging.Logger = logger(logger_name = 'DISK', file_name = 'disk_report.log', log_level = logging.INFO, no_console=True)
+
+
+log = configure_logger(
+    level=logging.INFO,
+    console=False,
+    logger_name=__name__,
+    log_file="disk_report.log"
+)
 
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(
@@ -26,99 +33,91 @@ def arg_parser() -> ArgumentParser:
     parser.add_argument('--users', type=str, required=True, help='CSV файл со списком пользователей')
     return parser
 
-def get_user_shared_resources(email: str, token: str, client: DiskClient):
+def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminClient, w: csv.DictWriter):
 
-    resources_list: PublicResourcesList = client.get_public_resources(token=token, limit=100, offset=0)
-
-    resource_items = resources_list.items
-    with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, ['email',
-                               'path',
-                               'access_type',
-                               'rights',
-                               'user_id',
-                               'external_user'])
+    resource_items: List[ResourceShort] = client.get_user_public_resources(user_id)
         
-        for resource in resource_items:
-
+    for resource in resource_items:
+        try:
             log.debug(f'*** Ресурс {resource.type}: {resource.name} путь: {resource.path}')
-            
-            resource_path = resource.path[5:]
-            res = client.get_public_settings(token, resource_path)
-            accesses = res.public_accesses
-            for access in accesses:
-                if access.access_type == 'macro':
-                    if access.macros == 'all':
-                        log.debug(f"Есть внешний доступ! Права: {access.rights}")
-                        w.writerow({
-                            'email': email,
-                            'path': resource_path,
-                            'access_type': 'public',
-                            'rights': access.rights,
-                            'user_id': '',
-                            'external_user': ''
 
-                        })
-                    elif access.macros == 'employees':
-                        log.debug(f"Только внутри компании. Права: {access.rights}")
-                        w.writerow({
-                            'email': email,
-                            'path': resource_path,
-                            'access_type': 'employees',
-                            'rights': access.rights,
-                            'user_id': '',
-                            'external_user': ''
-                        })
-                elif access.access_type == 'user':
+            try:
+                res = client.get_public_settings_by_path(user_id, resource.path)
+            except DiskClientError:
+                if not resource.public_hash:
+                    log.error(f'Не удалось получить настройки для ресурса {resource.path}: нет public_hash')
+                    continue
+                log.debug(f'Попытка получить настройки по public_hash для ресурса {resource.path}')
+                res = client.get_public_settings_by_key(resource.public_hash)
+
+            accesses = res.public_accesses
+            
+            for access in accesses:
+                if type(access) is MacroAccess:
+                    log.debug(f"Права: {access.rights}")
+                    access_type = access.access_type
+                    if access_type == 'macro':
+                        access_type = 'public'
+    
+                    w.writerow({
+                        'email': user_email,
+                        'path':  resource.path,
+                        'access_type': access_type,
+                        'rights': access.rights,
+                        'user_id': '',
+                        'external_user': ''
+                    })
+
+                elif type(access) is UserAccess:
                     log.debug(f"Доступ сотруднику: {access.user_id} права: {access.rights}")
                     w.writerow({
-                        'email': email,
-                        'path': resource_path,
-                        'access_type': 'user',
+                        'email': user_email,
+                        'path': resource.path,
+                        'access_type': access.access_type,
                         'rights': access.rights,
                         'user_id': access.user_id,
                         'external_user': not access.org_id
                     })
-                else:
-                    log.debug(f"Другой доступ: {access}")
-                    w.writerow({
-                        'email': email,
-                        'path': resource_path,
-                        'access_type': access.access_type,
-                        'rights': access.rights,
-                        'user_id': access.user_id,
-                        'external_user': not access.org_id,
-                        
-                    })
+        except DiskClientError as e:
+            log.error(f'Ошибка при получении публичных настроек для ресурса {resource.path}: {e}')
 
 
 def main(users: List[Dict]):
-    client = DiskClient()
-    client_id = os.getenv('CLIENT_ID')
-    client_secret = os.getenv('CLIENT_SECRET')
-    if not client_id or not client_secret:
-        raise ValueError('Не указаны переменные окружения CLIENT_ID и CLIENT_SECRET')
-    log.info('Загрузка пользователей...')
+
+    token = os.getenv('TOKEN')
+    org_id = os.getenv('ORG_ID')
+    if not token or not org_id:
+        raise ValueError('Не указаны переменные окружения TOKEN и/или ORG_ID')
 
     log.info(f'Загрузка пользователей завершена. Загружено {len(users)} пользователей.')
+    client = DiskAdminClient(token=token, org_id=org_id)
     processed = 0
     with tqdm(total=len(users), unit="User") as progress:
-        for user in users:
-            if user.get('ID', 'no_id')[:3] == '113':
-                user_email = user.get('Email', '')
-                log.info(f'Обработка ресурсов пользователя: {user_email}')
-                try:
-                    token = get_service_app_token(user_email, client_id, client_secret)
-                    get_user_shared_resources(user_email, token, client)
-                    processed += 1
-                
-                except Exception as e:
-                    log.error(f'Ошибка при обработке ресурсов пользователя: {user_email}')
-                    log.error(e)
-                    #raise e
-            else:
-                log.warning(f'Пропуск пользователя: {user_email}')
-            progress.update(1)
+        with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, ['email',
+                                'path',
+                                'access_type',
+                                'rights',
+                                'user_id',
+                                'external_user'])
+            for user in users:
+                if user.get('ID', '')[:3] == '113':
+                    
+                    user_id = user.get('ID', '')
+                    user_email = user.get('Email', '')
+                    log.info(f'Обработка ресурсов пользователя: {user_id}')
+                    try:
+                        get_user_shared_resources(user_id, user_email, client, w)
+                        processed += 1
+                    
+                    except Exception as e:
+                        log.error(f'Ошибка при обработке ресурсов пользователя: {user_email}')
+                        log.error(f'{type(e)} - {e}')
+                        
+                        #raise e
+                else:
+                    log.warning(f'Пропуск пользователя: {user.get('Email')}')
+                progress.update(1)
     client.close()
     return processed, users
 
@@ -142,6 +141,7 @@ if __name__ == '__main__':
     print('Запуск...\n')
     parser = arg_parser()
     args = parser.parse_args()
+    log.info('Загрузка пользователей...')
     users = read_users_csv(args.users)
     
     start_time = time()

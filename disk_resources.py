@@ -55,9 +55,9 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
             for access in accesses:
                 if type(access) is MacroAccess:
                     log.debug(f"Права: {access.rights}")
-                    access_type = access.access_type
-                    if access_type == 'macro':
-                        access_type = 'public'
+                    access_type = access.macros[0]
+                    #if access_type == 'macro':
+                        #access_type = 'public'
     
                     w.writerow({
                         'email': user_email,

@@ -84,7 +84,7 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
                             'user_id': access.user_id,
                             'shared_email': shared_user_email,
                             'external_user': not access.org_id
-                    })
+                        })
         except DiskClientError as e:
             log.error(f'Ошибка при получении публичных настроек для ресурса {resource.path}: {e}')
 
@@ -121,10 +121,8 @@ def main(users_list: List[Dict]):
                     except Exception as e:
                         log.error(f'Ошибка при обработке ресурсов пользователя: {user_email}')
                         log.error(f'{type(e)} - {e}')
-                        
-                        #raise e
                 else:
-                    log.warning(f'Пропуск пользователя: {user.get('Email')}')
+                    log.warning(f"Пропуск пользователя: {user.get('Email')}")
                 progress.update(1)
     client.close()
     return processed

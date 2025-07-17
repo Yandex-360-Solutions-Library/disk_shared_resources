@@ -21,6 +21,8 @@ log = configure_logger(
     log_file="disk_report.log"
 )
 
+users_from_csv = []
+
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(
         description=dedent("""
@@ -63,44 +65,50 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
                         'email': user_email,
                         'path':  resource.path,
                         'access_type': access_type,
-                        'rights': access.rights,
+                        'rights': access.rights[0],
                         'user_id': '',
+                        'shared_email': '',
                         'external_user': ''
                     })
 
                 elif type(access) is UserAccess:
                     log.debug(f"Доступ сотруднику: {access.user_id} права: {access.rights}")
-                    w.writerow({
-                        'email': user_email,
-                        'path': resource.path,
-                        'access_type': access.access_type,
-                        'rights': access.rights,
-                        'user_id': access.user_id,
-                        'external_user': not access.org_id
+                    if access.access_type != 'owner':
+                        shared_user_email = next((u['Email'] for u in users_from_csv if u['ID'] == str(access.user_id)), '')
+
+                        w.writerow({
+                            'email': user_email,
+                            'path': resource.path,
+                            'access_type': access.access_type,
+                            'rights': access.rights[0],
+                            'user_id': access.user_id,
+                            'shared_email': shared_user_email,
+                            'external_user': not access.org_id
                     })
         except DiskClientError as e:
             log.error(f'Ошибка при получении публичных настроек для ресурса {resource.path}: {e}')
 
 
-def main(users: List[Dict]):
+def main(users_list: List[Dict]):
 
     token = os.getenv('TOKEN')
     org_id = os.getenv('ORG_ID')
     if not token or not org_id:
         raise ValueError('Не указаны переменные окружения TOKEN и/или ORG_ID')
 
-    log.info(f'Загрузка пользователей завершена. Загружено {len(users)} пользователей.')
+    log.info(f'Загрузка пользователей завершена. Загружено {len(users_list)} пользователей.')
     client = DiskAdminClient(token=token, org_id=org_id)
     processed = 0
-    with tqdm(total=len(users), unit="User") as progress:
+    with tqdm(total=len(users_list), unit="User") as progress:
         with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
             w = csv.DictWriter(f, ['email',
                                 'path',
                                 'access_type',
                                 'rights',
                                 'user_id',
+                                'shared_email',
                                 'external_user'])
-            for user in users:
+            for user in users_list:
                 if user.get('ID', '')[:3] == '113':
                     
                     user_id = user.get('ID', '')
@@ -119,7 +127,7 @@ def main(users: List[Dict]):
                     log.warning(f'Пропуск пользователя: {user.get('Email')}')
                 progress.update(1)
     client.close()
-    return processed, users
+    return processed
 
 
 def read_users_csv(file_path: str) -> List[Dict]:
@@ -142,7 +150,8 @@ if __name__ == '__main__':
     parser = arg_parser()
     args = parser.parse_args()
     log.info('Загрузка пользователей...')
-    users = read_users_csv(args.users)
+
+    users_from_csv = read_users_csv(args.users)
     
     start_time = time()
 
@@ -152,15 +161,17 @@ if __name__ == '__main__':
                                'access_type',
                                'rights',
                                'user_id',
+                               'shared_email',
                                'external_user'
                                ])
         w.writeheader()    
 
     try:
-        processed, users = main(users=users)
+        processed = main(users_from_csv)
         end_time = time()
-        log.info(f'Завершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
-        print(f'\nЗавершено. Обработано пользователей: {processed} из {len(users)} за {round(end_time - start_time)} секунд.')
+        msg = f'Завершено. Обработано пользователей: {processed} из {len(users_from_csv)} за {round(end_time - start_time)} секунд.'
+        log.info(msg)
+        print(f'\n{msg}')
         print('Отчет: disk_report.log')
         print('Результат: disk_report.csv')
     except Exception as e:

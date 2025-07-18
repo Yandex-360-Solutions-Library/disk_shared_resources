@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from y360_orglib import DiskAdminClient, DiskClientError, configure_logger
 from y360_orglib.disk.models import MacroAccess, ResourceShort, UserAccess
 
+# Constants
 CSV_HEADERS = [
     'email',
     'path',
@@ -20,6 +21,9 @@ CSV_HEADERS = [
     'shared_email',
     'external_user'
 ]
+
+USER_ID_PREFIX_FILTER = '113'  # Только пользователи из организации
+VALID_USER_ID_LENGTH = 16      # Исключаем роботов и пр.
 
 
 
@@ -57,8 +61,8 @@ def process_access(w: csv.DictWriter, user_email: str, resource_path: str,
         'external_user': external_user
     })
 
-def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminClient, w: csv.DictWriter, users_list: List[Dict]):
-
+def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminClient, w: csv.DictWriter, users_lookup: Dict[str, str]):
+    """Обрабатываем публичные ресурсы пользователя"""
     resource_items: List[ResourceShort] = client.get_user_public_resources(user_id)
         
     for resource in resource_items:
@@ -77,16 +81,17 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
             accesses = res.public_accesses
             
             for access in accesses:
-                if type(access) is MacroAccess:
+                if isinstance(access, MacroAccess):
                     log.debug(f"Права: {access.rights}")
                     access_type = access.macros[0]
                     process_access(w, user_email, resource.path,
                                  access_type, access.rights[0])
 
-                elif type(access) is UserAccess:
+                elif isinstance(access, UserAccess):
                     log.debug(f"Доступ сотруднику: {access.user_id} права: {access.rights}")
                     if access.access_type != 'owner':
-                        shared_user_email = next((u['Email'] for u in users_list if u['ID'] == str(access.user_id)), '')
+                        # Use optimized lookup instead of linear search
+                        shared_user_email = users_lookup.get(str(access.user_id), '')
                         process_access(w, user_email, resource.path,
                                      access.access_type, access.rights[0],
                                      str(access.user_id), shared_user_email,
@@ -103,44 +108,55 @@ def main(users_list: List[Dict]):
         raise ValueError('Не указаны переменные окружения TOKEN и/или ORG_ID')
 
     log.info(f'Загрузка пользователей завершена. Загружено {len(users_list)} пользователей.')
+    
+    # Create user lookup dictionary for performance optimization
+    users_lookup = {user.get('ID', ''): user.get('Email', '') for user in users_list}
+    
     client = DiskAdminClient(token=token, org_id=org_id)
     processed = 0
-    with tqdm(total=len(users_list), unit="User") as progress:
-        with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
-            w = csv.DictWriter(f, CSV_HEADERS)
-            for user in users_list:
-                if user.get('ID', '')[:3] == '113':
-                    
+    
+    try:
+        with tqdm(total=len(users_list), unit="User") as progress:
+            with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
+                w = csv.DictWriter(f, CSV_HEADERS)
+                for user in users_list:
                     user_id = user.get('ID', '')
-                    user_email = user.get('Email', '')
-                    log.info(f'Обработка ресурсов пользователя: {user_id}')
-                    try:
-                        get_user_shared_resources(user_id, user_email, client, w, users_list)
-                        processed += 1
-                    
-                    except Exception as e:
-                        log.error(f'Ошибка при обработке ресурсов пользователя: {user_email}')
-                        log.error(f'{type(e)} - {e}')
-                else:
-                    log.warning(f"Пропуск пользователя: {user.get('Email')}")
-                progress.update(1)
-    client.close()
+                    if user_id[:3] == USER_ID_PREFIX_FILTER:
+                        user_email = user.get('Email', '')
+                        log.info(f'Обработка ресурсов пользователя: {user_id}')
+                        try:
+                            get_user_shared_resources(user_id, user_email, client, w, users_lookup)
+                            processed += 1
+                        except DiskClientError as e:
+                            log.error(f'Ошибка API при обработке ресурсов пользователя {user_email}: {e}')
+                        except Exception as e:
+                            log.error(f'Неожиданная ошибка при обработке пользователя {user_email}: {type(e).__name__} - {e}')
+                    else:
+                        log.warning(f"Пропуск пользователя: {user.get('Email')}")
+                    progress.update(1)
+    finally:
+        client.close()
+    
     return processed
 
 
 def read_users_csv(file_path: str) -> List[Dict]:
-    users:List[Dict] = []
+    """Загружаем список пользователей из CSV файла"""
+    users: List[Dict] = []
     try:
         with open(file_path, 'r', encoding='utf8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 user_id = row.get('ID')
-                if user_id and len(user_id) == 16:
+                if user_id and len(user_id) == VALID_USER_ID_LENGTH:
                     users.append(row)
         return users
     except FileNotFoundError:
-        print(f'Файл {file_path} не найден')
-        exit(1)
+        log.error(f'Файл {file_path} не найден')
+        raise FileNotFoundError(f'Файл пользователей {file_path} не найден')
+    except Exception as e:
+        log.error(f'Ошибка при чтении файла {file_path}: {e}')
+        raise
 
 if __name__ == '__main__':
     load_dotenv()
@@ -149,15 +165,16 @@ if __name__ == '__main__':
     args = parser.parse_args()
     log.info('Загрузка пользователей...')
 
-    users_from_csv = read_users_csv(args.users)
-    
-    start_time = time()
-
-    with open('disk_report.csv', 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, CSV_HEADERS)
-        w.writeheader()    
-
     try:
+        users_from_csv = read_users_csv(args.users)
+        
+        start_time = time()
+
+        # Initialize CSV file with headers
+        with open('disk_report.csv', 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, CSV_HEADERS)
+            w.writeheader()
+
         processed = main(users_from_csv)
         end_time = time()
         msg = f'Завершено. Обработано пользователей: {processed} из {len(users_from_csv)} за {round(end_time - start_time)} секунд.'
@@ -165,6 +182,18 @@ if __name__ == '__main__':
         print(f'\n{msg}')
         print('Отчет: disk_report.log')
         print('Результат: disk_report.csv')
+        
+    except FileNotFoundError as e:
+        log.error(f'Файл не найден: {e}')
+        print(f'Ошибка: {e}')
+        exit(1)
+    except ValueError as e:
+        log.error(f'Ошибка конфигурации: {e}')
+        print(f'Ошибка конфигурации: {e}')
+        exit(1)
     except Exception as e:
-        log.error(f'Ошибка: {e}')
+        log.error(f'Неожиданная ошибка: {type(e).__name__} - {e}')
+        print(f'Неожиданная ошибка: {e}')
+        exit(1)
+    
     exit(0)

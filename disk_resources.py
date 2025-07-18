@@ -1,5 +1,4 @@
-from argparse import ArgumentParser
-import argparse
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 import csv
 import logging
 import os
@@ -12,6 +11,16 @@ from dotenv import load_dotenv
 from y360_orglib import DiskAdminClient, DiskClientError, configure_logger
 from y360_orglib.disk.models import MacroAccess, ResourceShort, UserAccess
 
+CSV_HEADERS = [
+    'email',
+    'path',
+    'access_type',
+    'rights',
+    'user_id',
+    'shared_email',
+    'external_user'
+]
+
 
 
 log = configure_logger(
@@ -21,8 +30,6 @@ log = configure_logger(
     log_file="disk_report.log"
 )
 
-users_from_csv = []
-
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(
         description=dedent("""
@@ -30,12 +37,27 @@ def arg_parser() -> ArgumentParser:
         Параметры:
         --users <file.csv> - файл со списком пользователей получаемый скриптом listusers.py
         """),
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class = RawDescriptionHelpFormatter
     )
     parser.add_argument('--users', type=str, required=True, help='CSV файл со списком пользователей')
     return parser
 
-def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminClient, w: csv.DictWriter):
+def process_access(w: csv.DictWriter, user_email: str, resource_path: str,
+                  access_type: str, rights: str,
+                  user_id: str = '', shared_email: str = '',
+                  external_user: bool = False) -> None:
+    """Записывает информацию о доступе в CSV файл."""
+    w.writerow({
+        'email': user_email,
+        'path': resource_path,
+        'access_type': access_type,
+        'rights': rights,
+        'user_id': user_id,
+        'shared_email': shared_email,
+        'external_user': external_user
+    })
+
+def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminClient, w: csv.DictWriter, users_list: List[Dict]):
 
     resource_items: List[ResourceShort] = client.get_user_public_resources(user_id)
         
@@ -58,33 +80,17 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
                 if type(access) is MacroAccess:
                     log.debug(f"Права: {access.rights}")
                     access_type = access.macros[0]
-                    #if access_type == 'macro':
-                        #access_type = 'public'
-    
-                    w.writerow({
-                        'email': user_email,
-                        'path':  resource.path,
-                        'access_type': access_type,
-                        'rights': access.rights[0],
-                        'user_id': '',
-                        'shared_email': '',
-                        'external_user': ''
-                    })
+                    process_access(w, user_email, resource.path,
+                                 access_type, access.rights[0])
 
                 elif type(access) is UserAccess:
                     log.debug(f"Доступ сотруднику: {access.user_id} права: {access.rights}")
                     if access.access_type != 'owner':
-                        shared_user_email = next((u['Email'] for u in users_from_csv if u['ID'] == str(access.user_id)), '')
-
-                        w.writerow({
-                            'email': user_email,
-                            'path': resource.path,
-                            'access_type': access.access_type,
-                            'rights': access.rights[0],
-                            'user_id': access.user_id,
-                            'shared_email': shared_user_email,
-                            'external_user': not access.org_id
-                        })
+                        shared_user_email = next((u['Email'] for u in users_list if u['ID'] == str(access.user_id)), '')
+                        process_access(w, user_email, resource.path,
+                                     access.access_type, access.rights[0],
+                                     str(access.user_id), shared_user_email,
+                                     not access.org_id)
         except DiskClientError as e:
             log.error(f'Ошибка при получении публичных настроек для ресурса {resource.path}: {e}')
 
@@ -101,13 +107,7 @@ def main(users_list: List[Dict]):
     processed = 0
     with tqdm(total=len(users_list), unit="User") as progress:
         with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
-            w = csv.DictWriter(f, ['email',
-                                'path',
-                                'access_type',
-                                'rights',
-                                'user_id',
-                                'shared_email',
-                                'external_user'])
+            w = csv.DictWriter(f, CSV_HEADERS)
             for user in users_list:
                 if user.get('ID', '')[:3] == '113':
                     
@@ -115,7 +115,7 @@ def main(users_list: List[Dict]):
                     user_email = user.get('Email', '')
                     log.info(f'Обработка ресурсов пользователя: {user_id}')
                     try:
-                        get_user_shared_resources(user_id, user_email, client, w)
+                        get_user_shared_resources(user_id, user_email, client, w, users_list)
                         processed += 1
                     
                     except Exception as e:
@@ -154,14 +154,7 @@ if __name__ == '__main__':
     start_time = time()
 
     with open('disk_report.csv', 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, ['email',
-                               'path',
-                               'access_type',
-                               'rights',
-                               'user_id',
-                               'shared_email',
-                               'external_user'
-                               ])
+        w = csv.DictWriter(f, CSV_HEADERS)
         w.writeheader()    
 
     try:

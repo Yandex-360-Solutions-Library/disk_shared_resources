@@ -31,19 +31,19 @@ log = configure_logger(
     level=logging.INFO,
     console=False,
     logger_name=__name__,
-    log_file="disk_report.log"
+    log_file="disk_report_by_email.log"
 )
 
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(
         description=dedent("""
-        Скрипт выгружает данные о ресурсах на диске, которыми поделился пользователь в файл disk_report.csv
+        Скрипт выгружает данные о ресурсах на диске, которыми поделился пользователь в файл disk_report_by_email.csv
         Параметры:
-        --users <file.csv> - файл со списком пользователей получаемый скриптом listusers.py
+        --emails <file.csv> - файл со списком email адресов пользователей
         """),
         formatter_class = RawDescriptionHelpFormatter
     )
-    parser.add_argument('--users', type=str, required=True, help='CSV файл со списком пользователей')
+    parser.add_argument('--emails', type=str, required=True, help='CSV файл со списком email адресов')
     return parser
 
 def process_access(w: csv.DictWriter, user_email: str, resource_path: str,
@@ -100,26 +100,29 @@ def get_user_shared_resources(user_id: str, user_email: str, client: DiskAdminCl
             log.error(f'Ошибка при получении публичных настроек для ресурса {resource.path}: {e}')
 
 
-def load_all_users_lookup() -> Dict[str, str]:
-    """Загружает всех пользователей из API для создания полного lookup словаря"""
+def load_all_users_lookup() -> tuple[Dict[str, str], Dict[str, str]]:
+    """Загружает всех пользователей из API для создания lookup словарей"""
     token = os.getenv('TOKEN')
     org_id = os.getenv('ORG_ID')
     if not token or not org_id:
         raise ValueError('Не указаны переменные окружения TOKEN и/или ORG_ID')
     
-    log.info('Загрузка всех пользователей из API для lookup...')
+    log.info('Загрузка всех пользователей из API...')
     directory_client = DirectoryClient(api_key=token, org_id=org_id, ssl_verify=True)
     
     try:
         org_users = directory_client.get_all_users()
-        users_lookup = {}
+        users_lookup = {}  # user_id -> email
+        email_to_id = {}   # email -> user_id
         
         for org_user in org_users:
             user_id = str(org_user.uid)
-            users_lookup[user_id] = org_user.email
+            email = org_user.email
+            users_lookup[user_id] = email
+            email_to_id[email] = user_id
         
-        log.info(f'Загружено {len(users_lookup)} пользователей из API для lookup')
-        return users_lookup
+        log.info(f'Загружено {len(users_lookup)} пользователей из API')
+        return users_lookup, email_to_id
         
     except Exception as e:
         log.error(f"Ошибка при получении списка пользователей из API: {e}")
@@ -127,60 +130,64 @@ def load_all_users_lookup() -> Dict[str, str]:
     finally:
         directory_client.close()
 
-def main(users_list: List[Dict]):
+def main(email_list: List[str]):
 
     token = os.getenv('TOKEN')
     org_id = os.getenv('ORG_ID')
     if not token or not org_id:
         raise ValueError('Не указаны переменные окружения TOKEN и/или ORG_ID')
 
-    log.info(f'Загрузка пользователей из CSV завершена. Загружено {len(users_list)} пользователей.')
+    log.info(f'Загрузка email адресов завершена. Загружено {len(email_list)} адресов.')
     
-    # Load all users from API for complete lookup dictionary
-    users_lookup = load_all_users_lookup()
+    # Load all users from API for lookup dictionaries
+    users_lookup, email_to_id = load_all_users_lookup()
     
     client = DiskAdminClient(token=token, org_id=org_id)
     processed = 0
+    not_found = 0
     
     try:
-        with tqdm(total=len(users_list), unit="User") as progress:
-            with open('disk_report.csv', 'a', newline='', encoding='utf-8') as f:
+        with tqdm(total=len(email_list), unit="Email") as progress:
+            with open('disk_report_by_email.csv', 'a', newline='', encoding='utf-8') as f:
                 w = csv.DictWriter(f, CSV_HEADERS)
-                for user in users_list:
-                    user_id = user.get('ID', '')
-                    if user_id[:3] == USER_ID_PREFIX_FILTER:
-                        user_email = user.get('Email', '')
-                        log.info(f'Обработка ресурсов пользователя: {user_id}')
-                        try:
-                            get_user_shared_resources(user_id, user_email, client, w, users_lookup)
-                            processed += 1
-                        except DiskClientError as e:
-                            log.error(f'Ошибка API при обработке ресурсов пользователя {user_email}: {e}')
-                        except Exception as e:
-                            log.error(f'Неожиданная ошибка при обработке пользователя {user_email}: {type(e).__name__} - {e}')
+                for email in email_list:
+                    user_id = email_to_id.get(email)
+                    if user_id:
+                        if user_id[:3] == USER_ID_PREFIX_FILTER and len(user_id) == VALID_USER_ID_LENGTH:
+                            log.info(f'Обработка ресурсов пользователя: {email} (ID: {user_id})')
+                            try:
+                                get_user_shared_resources(user_id, email, client, w, users_lookup)
+                                processed += 1
+                            except DiskClientError as e:
+                                log.error(f'Ошибка API при обработке ресурсов пользователя {email}: {e}')
+                            except Exception as e:
+                                log.error(f'Неожиданная ошибка при обработке пользователя {email}: {type(e).__name__} - {e}')
+                        else:
+                            log.warning(f"Пропуск пользователя {email}: неподходящий ID {user_id}")
                     else:
-                        log.warning(f"Пропуск пользователя: {user.get('Email')}")
+                        log.warning(f"Пользователь с email {email} не найден в организации")
+                        not_found += 1
                     progress.update(1)
     finally:
         client.close()
     
-    return processed
+    return processed, not_found
 
 
-def read_users_csv(file_path: str) -> List[Dict]:
-    """Загружаем список пользователей из CSV файла"""
-    users: List[Dict] = []
+def read_emails_csv(file_path: str) -> List[str]:
+    """Загружаем список email адресов из CSV файла"""
+    emails: List[str] = []
     try:
         with open(file_path, 'r', encoding='utf8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                user_id = row.get('ID')
-                if user_id and len(user_id) == VALID_USER_ID_LENGTH:
-                    users.append(row)
-        return users
+                email = row.get('Email', '').strip()
+                if email:
+                    emails.append(email)
+        return emails
     except FileNotFoundError:
         log.error(f'Файл {file_path} не найден')
-        raise FileNotFoundError(f'Файл пользователей {file_path} не найден')
+        raise FileNotFoundError(f'Файл с email адресами {file_path} не найден')
     except Exception as e:
         log.error(f'Ошибка при чтении файла {file_path}: {e}')
         raise
@@ -190,25 +197,25 @@ if __name__ == '__main__':
     print('Запуск...\n')
     parser = arg_parser()
     args = parser.parse_args()
-    log.info('Загрузка пользователей из CSV...')
+    log.info('Загрузка email адресов из CSV...')
 
     try:
-        users_from_csv = read_users_csv(args.users)
+        emails_from_csv = read_emails_csv(args.emails)
         
         start_time = time()
 
         # Initialize CSV file with headers
-        with open('disk_report.csv', 'w', newline='', encoding='utf-8') as f:
+        with open('disk_report_by_email.csv', 'w', newline='', encoding='utf-8') as f:
             w = csv.DictWriter(f, CSV_HEADERS)
             w.writeheader()
 
-        processed = main(users_from_csv)
+        processed, not_found = main(emails_from_csv)
         end_time = time()
-        msg = f'Завершено. Обработано пользователей: {processed} из {len(users_from_csv)} за {round(end_time - start_time)} секунд.'
+        msg = f'Завершено. Обработано пользователей: {processed} из {len(emails_from_csv)} (не найдено: {not_found}) за {round(end_time - start_time)} секунд.'
         log.info(msg)
         print(f'\n{msg}')
-        print('Отчет: disk_report.log')
-        print('Результат: disk_report.csv')
+        print('Отчет: disk_report_by_email.log')
+        print('Результат: disk_report_by_email.csv')
         
     except FileNotFoundError as e:
         log.error(f'Файл не найден: {e}')
